@@ -1,0 +1,6 @@
+mavsdk
+pymavlink
+websockets
+asyncio
+sounddevice
+vosk

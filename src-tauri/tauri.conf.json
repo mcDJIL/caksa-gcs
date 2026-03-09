@@ -1,0 +1,37 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/schema.json",
+  "productName": "caksa-gcs",
+  "version": "0.1.0",
+  "identifier": "com.caksa.gcs",
+  "build": {
+    "beforeDevCommand": "npm run dev",
+    "devUrl": "http://localhost:5173",
+    "beforeBuildCommand": "npm run build",
+    "frontendDist": "../dist"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "main", 
+        "title": "Caksa GCS",
+        "width": 1280,
+        "height": 720
+      }
+    ],
+    "security": {
+      "csp": null,
+      "capabilities": ["default"] 
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": "all",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png"
+    ],
+    "externalBin": [
+      "binaries/caksa-backend"
+    ]
+  }
+}
