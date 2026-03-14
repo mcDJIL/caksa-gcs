@@ -309,6 +309,12 @@
         setLogs(prev => [...prev.slice(-49), { id: Date.now(), timestamp: new Date().toLocaleTimeString(), type, message }]);
     };
 
+    const sanitizeBatteryPercent = (value: unknown) => {
+        const n = Number(value);
+        if (!Number.isFinite(n) || n < 0) return 0;
+        return Math.min(100, n);
+    };
+
     useEffect(() => { if (activeTab === 'dashboard') logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs, activeTab]);
 
     // --- WEBSOCKET FIX (KEMBALI KE ASAL) ---
@@ -329,7 +335,11 @@
                     if(prev.armed && data.latitude !== 0 && data.longitude !== 0) {
                         pathDataRef.current.push([data.latitude, data.longitude]);
                     }
-                    return { ...prev, ...data }
+                    return {
+                        ...prev,
+                        ...data,
+                        battery_remaining: sanitizeBatteryPercent(data.battery_remaining ?? prev.battery_remaining)
+                    }
                 });
             } catch (e) {}
         };

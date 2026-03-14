@@ -227,7 +227,11 @@ async def stream_battery():
         rem = b.remaining_percent
         # Memastikan tidak ada crash/error akibat nilai NaN (kosong) dari SITL
         current_telemetry["battery_voltage"] = v if not math.isnan(v) else 0.0
-        current_telemetry["battery_remaining"] = (rem * 100) if not math.isnan(rem) else 0.0
+        # Beberapa autopilot/SITL kirim -1 saat data battery belum valid.
+        if math.isnan(rem) or rem < 0:
+            current_telemetry["battery_remaining"] = 0.0
+        else:
+            current_telemetry["battery_remaining"] = max(0.0, min(100.0, rem * 100))
 
 async def stream_attitude():
     async for a in drone_system.telemetry.attitude_euler():
