@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import { useState, useEffect, useRef } from "react";
 // Pastikan package ini sudah diinstall: npm install @tauri-apps/plugin-shell
 import { Command } from "@tauri-apps/plugin-shell"; 
 import GCSApp from "./gcs-frontend";

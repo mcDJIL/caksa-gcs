@@ -1,4 +1,4 @@
-    import React, { useState, useEffect, useRef } from 'react';
+    import { useState, useEffect, useRef } from 'react';
     // import { Command } from "@tauri-apps/plugin-shell"; // Hapus komentar ini jika di aplikasi lokal Tauri
 
     import { 
@@ -6,7 +6,7 @@
     AlertTriangle, ArrowUp, Gamepad2, Anchor, LayoutDashboard, 
     Map as MapIcon, Video, ClipboardCheck, Home, ArrowDown, Play, 
     CheckCircle, XCircle, RefreshCw, UploadCloud, Mic, MicOff, Maximize,
-    Grid, Box, Target, Box as Cube, Terminal, Cpu, Sun, Moon
+    Box as Cube, Cpu, Sun, Moon
     } from 'lucide-react';
 
     // --- STYLES ---
@@ -46,10 +46,40 @@
     battery_voltage: number; battery_remaining: number; latitude: number; longitude: number;
     altitude_relative: number; heading: number; pitch: number; roll: number;
     satellites: number; ground_speed: number; climb_rate: number;
+    vision_enabled?: boolean; vision_target_active?: boolean;
+    vision_target_dx?: number; vision_target_dy?: number; vision_last_seen?: number;
     }
 
     interface LogMessage { id: number; timestamp: string; type: string; message: string; }
     interface PreflightItem { id: string; label: string; status: 'PENDING' | 'PASS' | 'FAIL' | 'WARN'; detail: string; }
+    interface VisionStatus {
+    enabled: boolean; target_active: boolean;
+    target_dx: number; target_dy: number;
+    last_seen: number; age_sec: number;
+    source: string; host: string; port: number;
+    }
+
+    interface MissionPreviewPoint {
+    seq: number;
+    command: number;
+    lat: number;
+    lon: number;
+    }
+
+    interface MissionParams {
+    altitude: number;
+    clearance: number;
+    precision: number;
+    area_width: number;
+    area_length: number;
+    fov: number;
+    overlap: number;
+    use_pole_latlon: boolean;
+    pole1_lat: number;
+    pole1_lon: number;
+    pole2_lat: number;
+    pole2_lon: number;
+    }
 
     // --- 3D DRONE COMPONENT ---
     const Drone3DView = ({ telemetry, isMain, isDarkMode }: { telemetry: TelemetryData, isMain: boolean, isDarkMode: boolean }) => {
@@ -145,7 +175,7 @@
     };
 
     // --- LIVE VIDEO FEED ---
-    const LiveVideoFeed = ({ telemetry, isMain }: { telemetry: TelemetryData, isMain: boolean }) => {
+    const LiveVideoFeed = ({ isMain }: { isMain: boolean }) => {
         const videoRef = useRef<HTMLVideoElement>(null);
         useEffect(() => {
             navigator.mediaDevices.getUserMedia({ video: true }).then(stream => { if(videoRef.current) videoRef.current.srcObject = stream; }).catch(()=>{});
@@ -160,10 +190,12 @@
     };
 
     // --- MAP VIEW ---
-    const MapView = ({ id, telemetry, pathData, isMain }: any) => {
+    const MapView = ({ id, telemetry, pathData, missionPlanData, isMain }: any) => {
         const mapRef = useRef<any>(null);
         const markerRef = useRef<any>(null);
         const polylineRef = useRef<any>(null);
+        const missionPolylineRef = useRef<any>(null);
+        const missionMarkersRef = useRef<any>(null);
 
         useEffect(() => {
             if (!document.getElementById('leaflet-js')) {
@@ -197,10 +229,19 @@
                 
                 const marker = L.marker([startLat, startLng], { icon: droneIcon }).addTo(map);
                 const polyline = L.polyline(pathData, { color: '#3b82f6', weight: 4, opacity: 0.9 }).addTo(map);
+                const missionPolyline = L.polyline(missionPlanData, {
+                    color: '#22d3ee',
+                    weight: 3,
+                    opacity: 0.95,
+                    dashArray: '8,6'
+                }).addTo(map);
+                const missionMarkers = L.layerGroup().addTo(map);
                 
                 mapRef.current = map; 
                 markerRef.current = marker;
                 polylineRef.current = polyline;
+                missionPolylineRef.current = missionPolyline;
+                missionMarkersRef.current = missionMarkers;
             }
         }, [id]);
 
@@ -225,7 +266,30 @@
             else if(!isMain) mapRef.current.setView(pos);
         }, [telemetry.latitude, telemetry.longitude, telemetry.heading, pathData]);
 
-        return <div id={id} className="w-full h-full relative bg-[#111827]">{!isMain && <div className="absolute top-2 left-2 bg-black/50 px-2 py-1 rounded text-[10px] font-bold text-white z-[400]">MAP</div>}</div>;
+        useEffect(() => {
+            if (!mapRef.current || !missionPolylineRef.current || !missionMarkersRef.current) return;
+            const L = (window as any).L;
+            if (!L) return;
+
+            missionPolylineRef.current.setLatLngs(missionPlanData);
+            missionMarkersRef.current.clearLayers();
+
+            missionPlanData.forEach(([lat, lon]: [number, number], idx: number) => {
+                const isFirst = idx === 0;
+                const isLast = idx === missionPlanData.length - 1;
+                const color = isFirst ? '#16a34a' : isLast ? '#dc2626' : '#06b6d4';
+                const marker = L.circleMarker([lat, lon], {
+                    radius: 4,
+                    color,
+                    weight: 2,
+                    fillColor: color,
+                    fillOpacity: 0.9,
+                }).bindTooltip(`#${idx + 1}`, { direction: 'top', opacity: 0.8 });
+                missionMarkersRef.current.addLayer(marker);
+            });
+        }, [missionPlanData]);
+
+        return <div id={id} className="w-full h-full relative bg-[#111827]">{!isMain && <div className="absolute top-2 left-2 bg-black/50 px-2 py-1 rounded text-[10px] font-bold text-white z-400">MAP</div>}</div>;
     };
 
     // --- SUB-COMPONENTS ---
@@ -277,15 +341,43 @@
     const App = () => {
     const [activeTab, setActiveTab] = useState<'dashboard' | 'missions' | 'preflight'>('dashboard');
     const [mainView, setMainView] = useState<'map' | 'camera' | '3d'>('map'); 
-    const [wsStatus, setWsStatus] = useState<string>('DISCONNECTED');
     const [isVoiceActive, setIsVoiceActive] = useState(false); 
     const [isDarkMode, setIsDarkMode] = useState(true); 
+    const [visionStatus, setVisionStatus] = useState<VisionStatus>({
+        enabled: false, target_active: false,
+        target_dx: 0, target_dy: 0,
+        last_seen: 0, age_sec: 0,
+        source: 'udp', host: '127.0.0.1', port: 9000
+    });
+    const defaultMissionParams: MissionParams = {
+        altitude: 15,
+        clearance: 30,
+        precision: 20,
+        area_width: 100,
+        area_length: 30,
+        fov: 70,
+        overlap: 0.3,
+        use_pole_latlon: false,
+        pole1_lat: 0,
+        pole1_lon: 0,
+        pole2_lat: 0,
+        pole2_lon: 0
+    };
+    const [missionParams, setMissionParams] = useState<MissionParams>(() => {
+        try {
+            const saved = localStorage.getItem('caksa_missionParams');
+            if (saved) return { ...defaultMissionParams, ...JSON.parse(saved) };
+        } catch { /* ignore */ }
+        return defaultMissionParams;
+    });
 
     const [telemetry, setTelemetry] = useState<TelemetryData>({
         connected: false, armed: false, mode: 'DISARMED',
         battery_voltage: 0, battery_remaining: 0, latitude: 0, longitude: 0, 
         altitude_relative: 0, heading: 0, pitch: 0, roll: 0,
-        satellites: 0, ground_speed: 0, climb_rate: 0
+        satellites: 0, ground_speed: 0, climb_rate: 0,
+        vision_enabled: false, vision_target_active: false,
+        vision_target_dx: 0, vision_target_dy: 0, vision_last_seen: 0
     });
 
     const [preflightData, setPreflightData] = useState<PreflightItem[]>([
@@ -299,6 +391,7 @@
 
     const [logs, setLogs] = useState<LogMessage[]>([]);
     const logsEndRef = useRef<HTMLDivElement>(null);
+    const [missionPlanData, setMissionPlanData] = useState<[number, number][]>([]);
     
     const pathDataRef = useRef<[number, number][]>([]);
     const wsRef = useRef<WebSocket | null>(null);
@@ -317,49 +410,93 @@
 
     useEffect(() => { if (activeTab === 'dashboard') logsEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [logs, activeTab]);
 
-    // --- WEBSOCKET FIX (KEMBALI KE ASAL) ---
+    // --- WEBSOCKET WITH AUTO-RECONNECT ---
     useEffect(() => {
-        // DIKEMBALIKAN KE URL ASAL: Tanpa tambahan /telemetry!
-        const wsUrl = "ws://localhost:8080"; 
-        setWsStatus('CONNECTING');
-        
-        const ws = new WebSocket(wsUrl);
-        ws.onopen = () => { setWsStatus('CONNECTED'); setTelemetry(t => ({ ...t, connected: true })); addLog('SYS', 'Connected to Backend'); };
-        
-        ws.onmessage = (event) => {
-            try {
-                const data = JSON.parse(event.data);
-                if (data.type === 'PREFLIGHT_REPORT') { setPreflightData(data.report); addLog('INFO', 'Pre-flight check completed.'); return; }
-                if(data.mode) currentModeRef.current = data.mode;
-                setTelemetry(prev => {
-                    if(prev.armed && data.latitude !== 0 && data.longitude !== 0) {
-                        pathDataRef.current.push([data.latitude, data.longitude]);
+        const wsUrl = "ws://localhost:8080";
+        let ws: WebSocket;
+        let retryTimer: ReturnType<typeof setTimeout> | null = null;
+        let stopped = false;
+
+        const connect = () => {
+            if (stopped) return;
+            ws = new WebSocket(wsUrl);
+            wsRef.current = ws;
+
+            ws.onopen = () => {
+                setTelemetry(t => ({ ...t, connected: true }));
+                addLog('SYS', 'Connected to Backend');
+                ws.send(JSON.stringify({ type: 'REQ_VISION_STATUS' }));
+            };
+
+            ws.onmessage = (event) => {
+                try {
+                    const data = JSON.parse(event.data);
+                    if (data.type === 'PREFLIGHT_REPORT') { setPreflightData(data.report); addLog('INFO', 'Pre-flight check completed.'); return; }
+                    if (data.type === 'MISSION_UPLOAD_STATUS') {
+                        addLog(data.success ? 'INFO' : 'ERR', data.message || 'Mission upload status received.');
+                        return;
                     }
-                    return {
-                        ...prev,
-                        ...data,
-                        battery_remaining: sanitizeBatteryPercent(data.battery_remaining ?? prev.battery_remaining)
+                    if (data.type === 'MISSION_PREVIEW') {
+                        const points = Array.isArray(data.points) ? data.points as MissionPreviewPoint[] : [];
+                        const plan = points
+                            .filter(p => Number.isFinite(p.lat) && Number.isFinite(p.lon))
+                            .map(p => [Number(p.lat), Number(p.lon)] as [number, number]);
+                        setMissionPlanData(plan);
+                        addLog('INFO', `Mission preview loaded: ${plan.length} waypoint(s).`);
+                        return;
                     }
-                });
-            } catch (e) {}
+                    if (data.type === 'VISION_STATUS') {
+                        setVisionStatus({
+                            enabled: !!data.enabled,
+                            target_active: !!data.target_active,
+                            target_dx: Number(data.target_dx ?? 0),
+                            target_dy: Number(data.target_dy ?? 0),
+                            last_seen: Number(data.last_seen ?? 0),
+                            age_sec: Number(data.age_sec ?? 0),
+                            source: String(data.source ?? 'udp'),
+                            host: String(data.host ?? '127.0.0.1'),
+                            port: Number(data.port ?? 9000)
+                        });
+                        return;
+                    }
+                    if(data.mode) currentModeRef.current = data.mode;
+                    setTelemetry(prev => {
+                        if(prev.armed && data.latitude !== 0 && data.longitude !== 0) {
+                            pathDataRef.current.push([data.latitude, data.longitude]);
+                        }
+                        return {
+                            ...prev,
+                            ...data,
+                            battery_remaining: sanitizeBatteryPercent(data.battery_remaining ?? prev.battery_remaining)
+                        }
+                    });
+                } catch (e) {}
+            };
+
+            ws.onclose = () => {
+                setTelemetry(t => ({ ...t, connected: false }));
+                addLog('ERR', 'Disconnected – retry in 3s...');
+                if (!stopped) retryTimer = setTimeout(connect, 3000);
+            };
+            ws.onerror = () => { ws.close(); };
         };
-        
-        ws.onclose = () => { setWsStatus('DISCONNECTED'); setTelemetry(t => ({ ...t, connected: false })); addLog('ERR', 'Disconnected'); };
-        wsRef.current = ws;
-        
-        return () => ws.close();
+
+        connect();
+        return () => {
+            stopped = true;
+            if (retryTimer) clearTimeout(retryTimer);
+            ws?.close();
+        };
     }, []);
 
     // --- COMMANDS ---
     const sendCommand = (payload: any) => { if(wsRef.current?.readyState === WebSocket.OPEN) wsRef.current.send(JSON.stringify(payload)); };
+    const sendMissionCommand = (type: string) => sendCommand({ type, params: missionParams });
     
     const handleModeChange = (newMode: string) => { addLog('CMD', `Change mode to ${newMode}`); sendCommand({ type: 'SET_MODE', mode: newMode }); };
     const handleArm = () => { addLog('CMD', telemetry.armed ? 'Disarming...' : 'Arming...'); sendCommand({ type: 'COMMAND_LONG', command: 'MAV_CMD_COMPONENT_ARM_DISARM', param1: telemetry.armed ? 0 : 1 }); };
     const runPreflightCheck = () => { addLog('CMD', 'Running Diagnostics...'); setPreflightData(prev => prev.map(p => ({...p, status: 'PENDING', detail: 'Checking...'}))); sendCommand({ type: 'REQ_PREFLIGHT' }); };
-    const uploadFigure8 = () => { addLog('CMD', 'Uploading Figure 8...'); sendCommand({ type: 'UPLOAD_MISSION_FIGURE8' }); };
-    const uploadSquare = () => { addLog('CMD', 'Uploading Square...'); sendCommand({ type: 'UPLOAD_MISSION_SQUARE' }); };
-    const uploadScan = () => { addLog('CMD', 'Uploading Grid Scan...'); sendCommand({ type: 'UPLOAD_MISSION_SCAN' }); };
-    const uploadSpiral = () => { addLog('CMD', 'Uploading Spiral...'); sendCommand({ type: 'UPLOAD_MISSION_SPIRAL' }); };
+    const uploadFigure8 = () => { addLog('CMD', 'Uploading Figure 8...'); sendMissionCommand('UPLOAD_MISSION_FIGURE8'); };
     const startMission = () => { addLog('CMD', 'Starting Mission...'); sendCommand({ type: 'SET_MODE', mode: 'MISSION' }); };
 
     // --- VOICE CONTROL ---
@@ -406,6 +543,22 @@
         sendCommand({ type: 'TOGGLE_VOICE_BACKEND', state: newState });
         addLog('SYS', newState ? 'Voice ON' : 'Voice OFF');
     };
+
+    const toggleVision = () => {
+        const next = !visionStatus.enabled;
+        sendCommand({ type: 'TOGGLE_VISION', state: next });
+        addLog('SYS', next ? 'Vision ON' : 'Vision OFF');
+    };
+
+    const updateMissionParam = (key: keyof MissionParams, value: string) => {
+        if (key === 'use_pole_latlon') return;
+        const n = Number(value);
+        setMissionParams(prev => ({ ...prev, [key]: Number.isFinite(n) ? n : 0 }));
+    };
+
+    useEffect(() => {
+        try { localStorage.setItem('caksa_missionParams', JSON.stringify(missionParams)); } catch { /* ignore */ }
+    }, [missionParams]);
 
     // --- KEYBOARD OFFBOARD ---
     useEffect(() => {
@@ -492,6 +645,10 @@
                     <button onClick={() => setIsDarkMode(!isDarkMode)} title="Toggle Theme" className={`w-10 h-10 rounded-full flex items-center justify-center border-2 transition-all ${isDarkMode ? 'bg-gray-700 border-gray-600 text-yellow-400 hover:bg-gray-600' : 'bg-slate-200 border-slate-300 text-yellow-600 hover:bg-slate-300'}`}>
                     {isDarkMode ? <Sun size={18}/> : <Moon size={18}/>}
                     </button>
+
+                    <button onClick={toggleVision} title="Toggle Vision" className={`w-10 h-10 rounded-full flex items-center justify-center border-2 transition-all ${visionStatus.enabled ? 'bg-cyan-600 border-cyan-400 text-white' : (isDarkMode ? 'bg-gray-700 border-gray-600 text-gray-400' : 'bg-slate-200 border-slate-300 text-slate-500')}`}>
+                    <Cpu size={18}/>
+                    </button>
                 </div>
 
                 <div className="flex items-center gap-6">
@@ -510,18 +667,18 @@
                 {activeTab === 'dashboard' && (
                     <>
                         <div className={`flex-1 relative ${isDarkMode ? 'bg-gray-900' : 'bg-slate-200'} overflow-hidden`}>
-                            <div className={`absolute top-4 left-4 z-[50] ${isDarkMode ? 'bg-gray-800/90' : 'bg-white/90'} backdrop-blur p-1 rounded-lg border ${th.border} flex gap-1 shadow-lg`}>
+                            <div className={`absolute top-4 left-4 z-50 ${isDarkMode ? 'bg-gray-800/90' : 'bg-white/90'} backdrop-blur p-1 rounded-lg border ${th.border} flex gap-1 shadow-lg`}>
                                 <button onClick={() => setMainView('map')} className={`px-3 py-1.5 rounded-md text-xs font-bold flex items-center gap-2 transition-all ${mainView === 'map' ? 'bg-blue-600 text-white shadow' : (isDarkMode ? 'text-gray-400 hover:text-white' : 'text-slate-500 hover:text-blue-600')}`}><MapIcon size={14} /> MAP</button>
                                 <button onClick={() => setMainView('camera')} className={`px-3 py-1.5 rounded-md text-xs font-bold flex items-center gap-2 transition-all ${mainView === 'camera' ? 'bg-blue-600 text-white shadow' : (isDarkMode ? 'text-gray-400 hover:text-white' : 'text-slate-500 hover:text-blue-600')}`}><Video size={14} /> CAM</button>
                                 <button onClick={() => setMainView('3d')} className={`px-3 py-1.5 rounded-md text-xs font-bold flex items-center gap-2 transition-all ${mainView === '3d' ? 'bg-blue-600 text-white shadow' : (isDarkMode ? 'text-gray-400 hover:text-white' : 'text-slate-500 hover:text-blue-600')}`}><Cube size={14} /> 3D</button>
                             </div>
                             <div className="absolute inset-0 z-0">
-                                {mainView === 'map' && <MapView id="map-container-main" telemetry={telemetry} pathData={pathDataRef.current} isMain={true} />}
-                                {mainView === 'camera' && <LiveVideoFeed telemetry={telemetry} isMain={true} />}
+                                {mainView === 'map' && <MapView id="map-container-main" telemetry={telemetry} pathData={pathDataRef.current} missionPlanData={missionPlanData} isMain={true} />}
+                                {mainView === 'camera' && <LiveVideoFeed isMain={true} />}
                                 {mainView === '3d' && <Drone3DView telemetry={telemetry} isMain={true} isDarkMode={isDarkMode} />}
                             </div>
                             <div onClick={() => switchView(mainView === 'map' ? 'camera' : 'map')} className="absolute top-4 right-4 w-72 h-48 bg-black rounded-xl border-2 border-white/30 shadow-2xl z-50 overflow-hidden cursor-pointer hover:border-blue-500 hover:scale-105 transition-all group">
-                                {mainView === 'map' ? <LiveVideoFeed telemetry={telemetry} isMain={false} /> : <MapView id="map-container-pip" telemetry={telemetry} pathData={pathDataRef.current} isMain={false} />}
+                                {mainView === 'map' ? <LiveVideoFeed isMain={false} /> : <MapView id="map-container-pip" telemetry={telemetry} pathData={pathDataRef.current} missionPlanData={missionPlanData} isMain={false} />}
                                 <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"><Maximize className="text-white drop-shadow-md"/></div>
                             </div>
                         </div>
@@ -559,11 +716,33 @@
                                 </div>
                                 <button onClick={startMission} className={`px-6 py-3 rounded-lg font-bold shadow-lg flex items-center gap-2 transition-all ${telemetry.armed ? 'bg-green-600 hover:bg-green-700 text-white' : 'bg-slate-300 text-slate-500 cursor-not-allowed'}`} disabled={!telemetry.armed}><Play size={20}/> START MISSION</button>
                             </div>
+                            <div className={`${th.bgCard} rounded-xl border ${th.border} p-4 mb-6`}>
+                                <h4 className={`font-bold mb-3 ${th.textHead}`}>Mission Parameters</h4>
+                                <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                    <label className="flex flex-col gap-1"><span className={th.textMuted}>Altitude (m)</span><input type="number" value={missionParams.altitude} onChange={(e) => updateMissionParam('altitude', e.target.value)} className={`px-2 py-1 rounded border ${th.border} ${isDarkMode ? 'bg-gray-900 text-gray-100' : 'bg-white text-slate-800'}`} /></label>
+                                    <label className="flex flex-col gap-1"><span className={th.textMuted}>Clearance (m)</span><input type="number" value={missionParams.clearance} onChange={(e) => updateMissionParam('clearance', e.target.value)} className={`px-2 py-1 rounded border ${th.border} ${isDarkMode ? 'bg-gray-900 text-gray-100' : 'bg-white text-slate-800'}`} /></label>
+                                    <label className="flex flex-col gap-1"><span className={th.textMuted}>Precision</span><input type="number" value={missionParams.precision} onChange={(e) => updateMissionParam('precision', e.target.value)} className={`px-2 py-1 rounded border ${th.border} ${isDarkMode ? 'bg-gray-900 text-gray-100' : 'bg-white text-slate-800'}`} /></label>
+                                    <label className="flex flex-col gap-1"><span className={th.textMuted}>Area Width (m)</span><input type="number" value={missionParams.area_width} onChange={(e) => updateMissionParam('area_width', e.target.value)} className={`px-2 py-1 rounded border ${th.border} ${isDarkMode ? 'bg-gray-900 text-gray-100' : 'bg-white text-slate-800'}`} /></label>
+                                    <label className="flex flex-col gap-1"><span className={th.textMuted}>Area Length (m)</span><input type="number" value={missionParams.area_length} onChange={(e) => updateMissionParam('area_length', e.target.value)} className={`px-2 py-1 rounded border ${th.border} ${isDarkMode ? 'bg-gray-900 text-gray-100' : 'bg-white text-slate-800'}`} /></label>
+                                    <label className="flex flex-col gap-1"><span className={th.textMuted}>FOV (deg)</span><input type="number" value={missionParams.fov} onChange={(e) => updateMissionParam('fov', e.target.value)} className={`px-2 py-1 rounded border ${th.border} ${isDarkMode ? 'bg-gray-900 text-gray-100' : 'bg-white text-slate-800'}`} /></label>
+                                    <label className="flex flex-col gap-1"><span className={th.textMuted}>Overlap (0-1)</span><input type="number" step="0.05" value={missionParams.overlap} onChange={(e) => updateMissionParam('overlap', e.target.value)} className={`px-2 py-1 rounded border ${th.border} ${isDarkMode ? 'bg-gray-900 text-gray-100' : 'bg-white text-slate-800'}`} /></label>
+                                </div>
+                                <div className="mt-4 pt-3 border-t border-dashed border-slate-500/40">
+                                    <label className="flex items-center gap-2 text-xs mb-3">
+                                        <input type="checkbox" checked={missionParams.use_pole_latlon} onChange={(e) => setMissionParams(prev => ({ ...prev, use_pole_latlon: e.target.checked }))} />
+                                        <span className={th.textMuted}>Use Pole Lat/Lon for Figure 8</span>
+                                    </label>
+                                    <div className="grid grid-cols-2 md:grid-cols-4 gap-3 text-xs">
+                                        <label className="flex flex-col gap-1"><span className={th.textMuted}>Pole1 Lat</span><input type="number" step="0.000001" value={missionParams.pole1_lat} onChange={(e) => updateMissionParam('pole1_lat', e.target.value)} className={`px-2 py-1 rounded border ${th.border} ${isDarkMode ? 'bg-gray-900 text-gray-100' : 'bg-white text-slate-800'}`} /></label>
+                                        <label className="flex flex-col gap-1"><span className={th.textMuted}>Pole1 Lon</span><input type="number" step="0.000001" value={missionParams.pole1_lon} onChange={(e) => updateMissionParam('pole1_lon', e.target.value)} className={`px-2 py-1 rounded border ${th.border} ${isDarkMode ? 'bg-gray-900 text-gray-100' : 'bg-white text-slate-800'}`} /></label>
+                                        <label className="flex flex-col gap-1"><span className={th.textMuted}>Pole2 Lat</span><input type="number" step="0.000001" value={missionParams.pole2_lat} onChange={(e) => updateMissionParam('pole2_lat', e.target.value)} className={`px-2 py-1 rounded border ${th.border} ${isDarkMode ? 'bg-gray-900 text-gray-100' : 'bg-white text-slate-800'}`} /></label>
+                                        <label className="flex flex-col gap-1"><span className={th.textMuted}>Pole2 Lon</span><input type="number" step="0.000001" value={missionParams.pole2_lon} onChange={(e) => updateMissionParam('pole2_lon', e.target.value)} className={`px-2 py-1 rounded border ${th.border} ${isDarkMode ? 'bg-gray-900 text-gray-100' : 'bg-white text-slate-800'}`} /></label>
+                                    </div>
+                                </div>
+                            </div>
                             <div className="grid grid-cols-2 gap-4">
                                 <MissionCard title="Figure 8 Infinite" icon={RefreshCw} description="Terbang pola angka 8 (Lemniscate) secara terus menerus." onUpload={uploadFigure8} isDarkMode={isDarkMode} />
-                                <MissionCard title="Square Mapping" icon={Box} description="Terbang pola persegi mengelilingi titik awal." onUpload={uploadSquare} isDarkMode={isDarkMode} />
-                                <MissionCard title="Grid Scan" icon={Grid} description="Pola Zig-Zag untuk survei foto udara." onUpload={uploadScan} isDarkMode={isDarkMode} />
-                                <MissionCard title="Spiral Search" icon={Target} description="Terbang melingkar untuk pencarian area." onUpload={uploadSpiral} isDarkMode={isDarkMode} />
+                                {/* <MissionCard title="Mission 2 Capsule+Scan" icon={Target} description="Pola capsule di sekitar pole lalu lanjut grid scan terorientasi." onUpload={uploadMission2} isDarkMode={isDarkMode} /> */}
                             </div>
                         </div>
                     </div>
@@ -572,6 +751,21 @@
                 {activeTab === 'preflight' && (
                     <div className={`flex-1 ${th.bgApp} p-8 overflow-y-auto transition-colors`}>
                         <h2 className={`text-2xl font-bold ${th.textHead} mb-6 flex items-center gap-3`}><ClipboardCheck/> Pre-Flight Checklist</h2>
+                        <div className={`${th.bgCard} rounded-xl border ${th.border} max-w-3xl p-4 mb-4`}>
+                            <div className="flex items-center justify-between">
+                                <div>
+                                    <div className={`text-sm font-bold ${th.textHead}`}>Vision (YOLO UDP)</div>
+                                    <div className={`text-xs ${th.textMuted}`}>{visionStatus.host}:{visionStatus.port} • source: {visionStatus.source}</div>
+                                </div>
+                                <div className="flex items-center gap-2">
+                                    <span className={`px-2 py-1 rounded text-xs font-bold ${visionStatus.enabled ? 'bg-cyan-600 text-white' : (isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-slate-200 text-slate-600')}`}>{visionStatus.enabled ? 'ENABLED' : 'DISABLED'}</span>
+                                    <span className={`px-2 py-1 rounded text-xs font-bold ${visionStatus.target_active ? 'bg-green-600 text-white' : (isDarkMode ? 'bg-gray-700 text-gray-300' : 'bg-slate-200 text-slate-600')}`}>{visionStatus.target_active ? 'TARGET LOCK' : 'NO TARGET'}</span>
+                                </div>
+                            </div>
+                            <div className={`mt-2 text-xs ${th.textMuted}`}>
+                                dx: {visionStatus.target_dx.toFixed(2)} | dy: {visionStatus.target_dy.toFixed(2)} | age: {visionStatus.age_sec.toFixed(1)}s
+                            </div>
+                        </div>
                         <div className={`${th.bgCard} rounded-xl border ${th.border} max-w-3xl overflow-hidden`}>
                             {preflightData.map((item) => (
                                 <div key={item.id} className={`flex items-center justify-between p-5 border-b ${th.border} last:border-0 ${isDarkMode ? 'hover:bg-gray-750' : 'hover:bg-white'}`}>
